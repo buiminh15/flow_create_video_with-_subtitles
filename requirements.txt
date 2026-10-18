@@ -1,0 +1,5 @@
+gradio
+opencv-python
+rapidocr-onnxruntime
+deep-translator
+yt-dlp
