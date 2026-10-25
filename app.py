@@ -11,6 +11,7 @@ import core
 import downloader
 import gemini_ai
 import youtube_trends
+import video_cutter
 
 load_dotenv()
 
@@ -336,6 +337,34 @@ def yt_pick(urls, evt: gr.SelectData):
     return urls[r]
 
 
+CUTS_ROOT = Path("cuts")
+
+
+def _cuts_dir(video):
+    return CUTS_ROOT / Path(video).stem
+
+
+def cut_load(video):
+    if not video:
+        return gr.update(value=None), gr.update(choices=[])
+    files = video_cutter.list_cuts(_cuts_dir(video))
+    return video, gr.update(choices=files, value=files[0] if files else None)
+
+
+def cut_run(video, start, end, precise, progress=gr.Progress()):
+    if not video:
+        raise gr.Error("Chưa chọn video.")
+    try:
+        path = video_cutter.cut(video, start, end, _cuts_dir(video), bool(precise),
+                                cb=lambda f, m: progress(f, desc=m))
+    except ValueError as e:
+        raise gr.Error(str(e))
+    except RuntimeError as e:
+        raise gr.Error(str(e)[:500])
+    files = video_cutter.list_cuts(_cuts_dir(video))
+    return gr.update(choices=files, value=path), path, f"Đã lưu: {path}"
+
+
 def build():
     with gr.Blocks(title="Dịch phụ đề cứng") as ui:
         gr.Markdown("## Dịch phụ đề cứng (hardsub) · OCR → Dịch → Dựng video")
@@ -347,6 +376,24 @@ def build():
         upload.change(lambda f: f or "", upload, video)
 
         with gr.Tabs():
+            with gr.Tab("✂ Cắt video"):
+                gr.Markdown(
+                    "Cắt 1 đoạn từ video, lưu thành file riêng trong `cuts/<tên video>/`. "
+                    "Phần này độc lập, không ảnh hưởng tới OCR/dịch/xuất video ở các tab khác."
+                )
+                with gr.Row():
+                    cut_upload = gr.File(label="Chọn video", file_types=["video"], type="filepath", scale=1)
+                    cut_src = gr.Textbox(label="Hoặc dán đường dẫn video", scale=2)
+                cut_player = gr.Video(label="Xem video để xác định điểm cắt (tạm dừng rồi đọc thời gian)")
+                with gr.Row():
+                    cut_start = gr.Textbox(label="Bắt đầu (giây hoặc mm:ss, ví dụ 1:23)", value="0")
+                    cut_end = gr.Textbox(label="Kết thúc (giây hoặc mm:ss)", value="10")
+                    cut_precise = gr.Checkbox(value=True, label="Cắt chính xác (encode lại, chậm hơn)")
+                cut_btn = gr.Button("Cắt & Lưu", variant="primary")
+                cut_msg = gr.Markdown()
+                cut_result = gr.Video(label="Đoạn vừa cắt", interactive=False)
+                cut_list = gr.Dropdown(label="Các đoạn đã cắt từ video này", choices=[], interactive=True)
+
             with gr.Tab("Trend YouTube"):
                 gr.Markdown(
                     "Xem video đang trending theo khu vực (YouTube Data API v3) để tìm nội dung phù hợp, "
@@ -402,7 +449,8 @@ def build():
                         lh = gr.Slider(1, 720, value=60, step=1, label="Logo cao")
                         jp_mode = gr.Checkbox(
                             value=False,
-                            label="Video Nhật (thêm vùng OCR tiếng Nhật ở trên, vùng phụ đề/bản dịch vẫn ở dưới)")
+                            label="Video Nhật — double sub (OCR vùng trên = tiếng Nhật, xuất video 2 dòng: "
+                                  "trên = text gốc trong file dịch, dưới = bản dịch)")
                         jp_y0 = gr.Slider(0, 719, value=20, step=1, label="Phụ đề Nhật: y trên",
                                          visible=False)
                         jp_y1 = gr.Slider(1, 720, value=100, step=1, label="Phụ đề Nhật: y dưới",
@@ -410,9 +458,11 @@ def build():
                         step = gr.Slider(0.25, 1.0, value=0.5, step=0.25, label="Chu kỳ lấy mẫu OCR (giây)")
                         force = gr.Checkbox(label="OCR lại từ đầu (bỏ cache/checkpoint)")
                         ocr_btn = gr.Button("Chạy OCR", variant="primary")
-                gr.Markdown("Ô xanh = vùng phụ đề/bản dịch (dưới) · Ô đỏ = logo · Ô vàng = vùng OCR tiếng Nhật "
-                           "(trên, chỉ hiện khi bật 'Video Nhật'). Khi bật Video Nhật, OCR sẽ đọc từ vùng vàng "
-                           "(tiếng Nhật) làm nguồn để dịch, còn vùng xanh dùng để hiện bản dịch khi xuất video.")
+                gr.Markdown(
+                    "Ô xanh = vùng dịch (dưới) · Ô đỏ = logo · Ô vàng = vùng tiếng Nhật (trên, chỉ hiện khi bật "
+                    "'Video Nhật'). Khi bật: OCR đọc vùng vàng làm 'text' (tiếng Nhật); lúc xuất video cả 2 vùng "
+                    "đều được xoá nền gốc rồi chèn lại — dòng trên hiện 'text' (tiếng Nhật, từ file dịch json), "
+                    "dòng dưới hiện 'tr' (bản dịch).")
                 ocr_msg = gr.Markdown()
                 ocr_tbl = gr.Dataframe(headers=COLS, label="Kết quả OCR", interactive=False, wrap=True)
             cfg_in = [y0, y1, use_logo, lx, ly, lw, lh, jp_mode, jp_y0, jp_y1]
@@ -501,6 +551,11 @@ def build():
                 out_vid = gr.Video(label="Xem thử", interactive=False)
 
         # ---- nối sự kiện ----
+        cut_upload.change(lambda f: f or "", cut_upload, cut_src)
+        cut_src.change(cut_load, cut_src, [cut_player, cut_list])
+        cut_btn.click(cut_run, [cut_src, cut_start, cut_end, cut_precise], [cut_list, cut_result, cut_msg])
+        cut_list.change(lambda p: p, cut_list, cut_result)
+
         yt_cat_btn.click(yt_categories, [yt_key, yt_region], yt_cat)
         yt_fetch_btn.click(yt_fetch, [yt_key, yt_region, yt_mode, yt_cat, yt_query, yt_order, yt_max],
                            [yt_tbl, yt_urls, yt_msg])

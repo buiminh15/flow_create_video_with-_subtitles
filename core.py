@@ -263,8 +263,21 @@ def _ts(t):
     return f"{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}"
 
 
-def write_ass(segs, path, w, h, font="Arial", size=0):
+def _ass_escape(t):
+    return t.replace("{", "(").replace("}", ")").replace(chr(10), chr(92) + "N")
+
+
+def write_ass(segs, path, w, h, font="Arial", size=0, cfg=None):
+    """Ghi file .ass. Nếu cfg có jp_mode=True: double sub — dòng trên (style JP) hiện 'text' (gốc,
+    ví dụ tiếng Nhật), dòng dưới (style Default) hiện 'tr' (bản dịch)."""
+    cfg = cfg or {}
     size = size or int(h * 0.055)
+    styles = [f"Style: Default,{font},{size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,2,60,60,{int(h * 0.06)},1"]
+    jp_mode = cfg.get("jp_mode", False)
+    if jp_mode:
+        jp_size = max(14, int(size * 0.9))
+        jp_marginv = max(4, int(cfg.get("jp_y0", 20) * h / REF_H))
+        styles.append(f"Style: JP,{font},{jp_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,8,60,60,{jp_marginv},1")
     head = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {w}
@@ -272,16 +285,18 @@ PlayResY: {h}
 
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
-Style: Default,{font},{size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,2,60,60,{int(h * 0.06)},1
+{chr(10).join(styles)}
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
 """
-    body = "".join(
-        f"Dialogue: 0,{_ts(s['start'])},{_ts(s['end'])},Default,,0,0,0,,"
-        f"{s['tr'].replace('{', '(').replace('}', ')').replace(chr(10), chr(92) + 'N')}\n"
-        for s in segs if s.get("tr"))
-    Path(path).write_text(head + body, encoding="utf-8-sig")
+    lines = []
+    for s in segs:
+        if s.get("tr"):
+            lines.append(f"Dialogue: 0,{_ts(s['start'])},{_ts(s['end'])},Default,,0,0,0,,{_ass_escape(s['tr'])}")
+        if jp_mode and s.get("text"):
+            lines.append(f"Dialogue: 0,{_ts(s['start'])},{_ts(s['end'])},JP,,0,0,0,,{_ass_escape(s['text'])}")
+    Path(path).write_text(head + "".join(l + "\n" for l in lines), encoding="utf-8-sig")
 
 
 def _merge_intervals(segs, gap=0.3):
@@ -318,11 +333,19 @@ def build_filter(segs, w, h, ass, cfg):
     bh_ = max(8, int(cfg["sub_y1"] * sy) - 15 - by0)
     bx, bw_ = int(w * 0.1), int(w * 0.8)
     en = _time_expr(_merge_intervals(segs))
-    f.append(f"[{cur}]split[a][b]")
-    f.append(f"[b]crop={bw_}:{bh_}:{bx}:{by0},gblur=5:2[bl]")
-    f.append(f"[a][bl]overlay={bx}:{by0}:enable='{en}'[o]")
+    f.append(f"[{cur}]split[a0][b0]")
+    f.append(f"[b0]crop={bw_}:{bh_}:{bx}:{by0},gblur=5:2[bl0]")
+    cur = "ov0"
+    f.append(f"[a0][bl0]overlay={bx}:{by0}:enable='{en}'[{cur}]")
+    if cfg.get("jp_mode"):
+        jby0 = int(cfg["jp_y0"] * sy)
+        jbh = max(8, int(cfg["jp_y1"] * sy) - jby0)
+        f.append(f"[{cur}]split[a1][b1]")
+        f.append(f"[b1]crop={bw_}:{jbh}:{bx}:{jby0},gblur=5:2[bl1]")
+        cur = "ov1"
+        f.append(f"[a1][bl1]overlay={bx}:{jby0}:enable='{en}'[{cur}]")
     assp = str(Path(ass).resolve()).replace("\\", "/").replace(":", "\\:")
-    f.append(f"[o]subtitles='{assp}'[v]")
+    f.append(f"[{cur}]subtitles='{assp}'[v]")
     return ";\n".join(f)
 
 
@@ -367,7 +390,7 @@ def render(video, pdir, segs, lang, cfg, font="Arial", size=0, split_mode="sente
     w, h, fps, n = probe(video)
     dur = n / fps
     ass = pdir / f"sub.{lang}.ass"
-    write_ass(segs, ass, w, h, font, size)
+    write_ass(segs, ass, w, h, font, size, cfg)
     script = pdir / "filter.txt"
     script.write_text(build_filter(segs, w, h, ass, cfg), encoding="utf-8")
     preset, crf = QUALITY[quality]
@@ -416,7 +439,7 @@ def preview_frame(video, pdir, segs, cfg, t, font="Arial", size=0):
     pdir = Path(pdir)
     w, h, _, _ = probe(video)
     ass = pdir / "preview.ass"
-    write_ass(segs, ass, w, h, font, size)
+    write_ass(segs, ass, w, h, font, size, cfg)
     script = pdir / "preview_filter.txt"
     script.write_text(build_filter(segs, w, h, ass, cfg), encoding="utf-8")
     out = pdir / "preview.png"
