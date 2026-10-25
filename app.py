@@ -1,11 +1,18 @@
 """Giao diện web (Gradio) cho pipeline dịch phụ đề cứng. Chạy: python app.py"""
 import json
+import os
+import time as time_module
 from pathlib import Path
 
 import gradio as gr
+from dotenv import load_dotenv
 
 import core
 import downloader
+import gemini_ai
+import youtube_trends
+
+load_dotenv()
 
 COLS = ["id", "start", "end", "text", "tr"]
 LANGS = {"Tiếng Việt": "vi", "English": "en", "Bahasa Indonesia": "id", "ไทย": "th"}
@@ -194,6 +201,120 @@ def dl_update():
     return downloader.update_ytdlp()
 
 
+# ---------- tab Gemini: transcribe & TTS ----------
+def gm_transcribe(api_key, video, src_file, lang_hint, progress=gr.Progress()):
+    path = src_file or video
+    if not path:
+        raise gr.Error("Chưa chọn video/audio để transcribe.")
+    hint = "" if lang_hint in (None, "Tự nhận diện") else lang_hint
+    segs = gemini_ai.transcribe(path, api_key, hint, cb=lambda f, m: progress(f, desc=m))
+    if not segs:
+        raise gr.Error("Không nhận diện được giọng nói nào.")
+    return _rows(segs), f"Transcribe xong: {len(segs)} đoạn."
+
+
+def gm_translate(api_key, lang_name, only_missing, rows, progress=gr.Progress()):
+    segs = _segs_from_rows(rows)
+    if not segs:
+        raise gr.Error("Chưa có kết quả transcribe.")
+    gemini_ai.translate_segments(segs, LANGS[lang_name], only_missing=only_missing, api_key=api_key,
+                                 cb=lambda f, m: progress(f, desc=m))
+    return _rows(segs), f"Dịch xong {len(segs)} đoạn sang {lang_name}."
+
+
+def gm_use_as_ocr(video, out_root, src_file, lang_name, rows):
+    path = video or src_file
+    if not path:
+        raise gr.Error("Chưa chọn video.")
+    pd = core.project_dir(path, out_root or "output")
+    segs = _segs_from_rows(rows)
+    if not segs:
+        raise gr.Error("Chưa có kết quả transcribe.")
+    core.write_json(Path(pd) / "ocr.json", segs)
+    core.write_json(core.tr_path(pd, LANGS[lang_name]), segs)
+    msg = f"Đã lưu {len(segs)} đoạn vào {pd} — sang tab ③ Kiểm tra & sửa để xem/chỉnh, tab ④ để xuất video."
+    is_video_file = Path(path).suffix.lower() in gemini_ai.VIDEO_EXTS
+    return msg, (gr.update() if video or not is_video_file else path)
+
+
+def gm_tts(api_key, video, out_root, text, voice, style, progress=gr.Progress()):
+    if not text or not text.strip():
+        raise gr.Error("Chưa nhập nội dung cần đọc.")
+    out_dir = Path(out_root or "output")
+    try:
+        pd = _pd(video, out_root)
+        out_dir = Path(pd)
+    except gr.Error:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"tts_{int(time_module.time())}.wav"
+    path = gemini_ai.text_to_speech(text, api_key, voice, out, style, cb=lambda f, m: progress(f, desc=m))
+    return path, f"Đã tạo file: {path}"
+
+
+GM_PREVIEW_TEXT = "Xin chào, đây là mẫu thử giọng đọc. Một hai ba, thử giọng để chọn trước khi tạo file đầy đủ."
+
+
+def gm_preview(api_key, voice, style, progress=gr.Progress()):
+    import hashlib
+    key = hashlib.md5(f"{voice}|{style}".encode("utf-8")).hexdigest()[:12]
+    out = Path("output") / "_tts_preview_cache" / f"{voice}_{key}.wav"
+    if out.exists():
+        return str(out)
+    path = gemini_ai.text_to_speech(GM_PREVIEW_TEXT, api_key, voice, out, style,
+                                    cb=lambda f, m: progress(f, desc=m))
+    return path
+
+
+def gm_tts_from_table(api_key, video, out_root, rows, lang_name, voice, style, progress=gr.Progress()):
+    segs = _segs_from_rows(rows)
+    if not segs:
+        raise gr.Error("Chưa có dữ liệu ở bảng ③.")
+    text = "\n".join(s["tr"] or s["text"] for s in segs if (s["tr"] or s["text"]).strip())
+    return gm_tts(api_key, video, out_root, text, voice, style, progress)
+
+
+YT_COLS = ["title", "channel", "views", "likes", "comments", "published"]
+
+
+def _yt_rows(items):
+    return [[it["title"], it["channel"], it["views"], it["likes"], it["comments"], it["published"]]
+            for it in items], [it["url"] for it in items]
+
+
+def yt_categories(yt_key, region):
+    try:
+        cats = youtube_trends.video_categories(yt_key, region or "TH")
+    except Exception as e:
+        raise gr.Error(str(e)[:300])
+    choices = ["(Tất cả)"] + [f"{v} ({k})" for k, v in sorted(cats.items(), key=lambda x: x[1])]
+    return gr.update(choices=choices, value="(Tất cả)")
+
+
+def yt_fetch(yt_key, region, mode, category, query, order, max_results):
+    region = (region or "TH").strip().upper()
+    try:
+        if mode == "Top trending":
+            cat_id = "" if not category or category.startswith("(") else category.split("(")[-1].rstrip(")")
+            items = youtube_trends.trending(yt_key, region, cat_id, int(max_results))
+        else:
+            if not query.strip():
+                raise gr.Error("Chưa nhập từ khoá tìm kiếm.")
+            items = youtube_trends.search(yt_key, query.strip(), region, int(max_results), order)
+    except gr.Error:
+        raise
+    except Exception as e:
+        raise gr.Error(str(e)[:300])
+    rows, urls = _yt_rows(items)
+    return rows, urls, f"Tìm được {len(items)} video (khu vực {region})."
+
+
+def yt_pick(urls, evt: gr.SelectData):
+    r = evt.index[0]
+    if not urls or r >= len(urls):
+        return gr.update()
+    return urls[r]
+
+
 def build():
     with gr.Blocks(title="Dịch phụ đề cứng") as ui:
         gr.Markdown("## Dịch phụ đề cứng (hardsub) · OCR → Dịch → Dựng video")
@@ -205,9 +326,36 @@ def build():
         upload.change(lambda f: f or "", upload, video)
 
         with gr.Tabs():
+            with gr.Tab("Trend YouTube"):
+                gr.Markdown(
+                    "Xem video đang trending theo khu vực (YouTube Data API v3) để tìm nội dung phù hợp, "
+                    "sau đó bấm vào một dòng để lấy link, dán sang tab ⓪ Tải video. "
+                    "Cần `YOUTUBE_API_KEY` trong file .env hoặc nhập ở ô dưới."
+                )
+                yt_key = gr.Textbox(label="YouTube API key (bỏ trống nếu đã đặt trong .env)", type="password",
+                                    value=os.environ.get("YOUTUBE_API_KEY", ""))
+                with gr.Row():
+                    yt_region = gr.Textbox(value="TH", label="Mã khu vực (TH=Thái Lan, VN, US, JP...)", scale=1)
+                    yt_mode = gr.Radio(["Top trending", "Tìm theo từ khoá"], value="Top trending",
+                                       label="Chế độ", scale=1)
+                    yt_max = gr.Slider(5, 50, value=25, step=5, label="Số video", scale=1)
+                with gr.Row():
+                    yt_cat_btn = gr.Button("Tải danh mục")
+                    yt_cat = gr.Dropdown(["(Tất cả)"], value="(Tất cả)", label="Danh mục (chỉ áp dụng Top trending)")
+                with gr.Row():
+                    yt_query = gr.Textbox(label="Từ khoá (chỉ áp dụng Tìm theo từ khoá)")
+                    yt_order = gr.Dropdown(["viewCount", "date", "rating", "relevance"], value="viewCount",
+                                           label="Sắp xếp theo")
+                yt_fetch_btn = gr.Button("Lấy video", variant="primary")
+                yt_msg = gr.Markdown()
+                yt_tbl = gr.Dataframe(headers=YT_COLS, interactive=False, wrap=True,
+                                      label="Bấm vào một dòng để lấy link video")
+                yt_urls = gr.State([])
+                yt_picked = gr.Textbox(label="Link video đã chọn (copy sang tab ⓪ Tải video)")
+
             with gr.Tab("⓪ Tải video"):
-                gr.Markdown("Dán link Bilibili (tải tất cả các phần nếu video nhiều tập). Chỉ dùng cho nội dung bạn được phép tải.")
-                dl_url = gr.Textbox(label="Link video Bilibili")
+                gr.Markdown("Dán link Bilibili hoặc YouTube (tải tất cả các phần nếu video nhiều tập). Chỉ dùng cho nội dung bạn được phép tải.")
+                dl_url = gr.Textbox(label="Link video Bilibili / YouTube")
                 with gr.Row():
                     dl_quality = gr.Dropdown(list(downloader.QUALITY), value="1080p (H.264)", label="Chất lượng")
                     dl_cookies = gr.File(label="Cookies (tuỳ chọn, định dạng Netscape .txt)", type="filepath")
@@ -261,6 +409,45 @@ def build():
                                        interactive=True, wrap=True, scale=3, col_count=(5, "fixed"))
                     prev = gr.Image(label="Xem trước", interactive=False, scale=2)
 
+            with gr.Tab("⑤ Gemini: Transcribe & TTS"):
+                gr.Markdown(
+                    "Dùng Gemini API (Google AI Studio) để nhận diện giọng nói thành văn bản và đọc văn bản "
+                    "thành giọng nói. Lấy API key tại [aistudio.google.com/apikey](https://aistudio.google.com/apikey)."
+                )
+                gm_key = gr.Textbox(
+                    label="API key Gemini (bỏ trống nếu đã đặt trong file .env)", type="password",
+                    placeholder="AIza...",
+                    value=os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", ""))
+                with gr.Accordion("Transcribe (audio/video → văn bản)", open=True):
+                    gm_src = gr.File(label="File audio/video (bỏ trống để dùng video đã chọn ở trên)",
+                                     type="filepath")
+                    gm_lang = gr.Dropdown(["Tự nhận diện", "Tiếng Việt", "English", "Chinese"],
+                                          value="Tự nhận diện",
+                                          label="Ngôn ngữ nói trong audio (giúp Gemini nhận diện đúng hơn; "
+                                                "transcribe ra đúng ngôn ngữ này, không dịch)")
+                    gm_tr_btn = gr.Button("Transcribe", variant="primary")
+                    gm_tr_msg = gr.Markdown()
+                    gm_tr_tbl = gr.Dataframe(headers=COLS, label="Kết quả transcribe", interactive=True, wrap=True)
+                    with gr.Row():
+                        gm_out_lang = gr.Dropdown(list(LANGS), value="Tiếng Việt", label="Dịch cột 'tr' sang")
+                        gm_only_missing = gr.Checkbox(value=True, label="Chỉ dịch dòng còn trống")
+                    gm_trans_btn = gr.Button("Dịch bằng Gemini (điền cột 'tr')", variant="primary")
+                    gm_use_btn = gr.Button("Dùng kết quả này làm phụ đề + bản dịch (ghi ocr.json/translated.json)")
+                with gr.Accordion("Text-to-Speech (văn bản → giọng nói)", open=True):
+                    with gr.Row():
+                        gm_voice = gr.Dropdown(gemini_ai.VOICES, value="Kore", label="Giọng đọc", scale=2)
+                        gm_preview_btn = gr.Button("🔊 Nghe thử giọng", scale=1)
+                    gm_preview_audio = gr.Audio(label="Mẫu thử", interactive=False)
+                    gm_style = gr.Dropdown(gemini_ai.STYLE_PRESETS, value=gemini_ai.STYLE_PRESETS[0],
+                                           allow_custom_value=True,
+                                           label="Phong cách đọc (chọn mẫu hoặc tự nhập)")
+                    gm_text = gr.Textbox(label="Văn bản cần đọc", lines=6)
+                    with gr.Row():
+                        gm_tts_btn = gr.Button("Đọc văn bản trên", variant="primary")
+                        gm_tts_tbl_btn = gr.Button("Đọc theo bảng ③ (dùng bản dịch)")
+                    gm_tts_audio = gr.Audio(label="Kết quả", interactive=False)
+                    gm_tts_msg = gr.Markdown()
+
             with gr.Tab("④ Xuất video"):
                 with gr.Row():
                     font = gr.Textbox(value="Arial", label="Font")
@@ -278,6 +465,12 @@ def build():
                 out_vid = gr.Video(label="Xem thử", interactive=False)
 
         # ---- nối sự kiện ----
+        yt_cat_btn.click(yt_categories, [yt_key, yt_region], yt_cat)
+        yt_fetch_btn.click(yt_fetch, [yt_key, yt_region, yt_mode, yt_cat, yt_query, yt_order, yt_max],
+                           [yt_tbl, yt_urls, yt_msg])
+        yt_tbl.select(yt_pick, yt_urls, yt_picked)
+        yt_picked.change(lambda u: u or "", yt_picked, dl_url)
+
         dl_info_btn.click(dl_info, [dl_url, dl_cookies], dl_msg)
         dl_btn.click(dl_run, [dl_url, dl_quality, dl_cookies], [dl_pick, video, dl_msg])
         dl_pick.input(lambda f: f or "", dl_pick, video)
@@ -299,6 +492,17 @@ def build():
         render_in = [video, out_root, lang, tbl, font, size, split_mode, split_sec, quality]
         test_btn.click(render_test, [*render_in, *cfg_in], [out_files, out_vid, out_msg])
         full_btn.click(render_full, [*render_in, *cfg_in], [out_files, out_vid, out_msg])
+
+        gm_tr_btn.click(gm_transcribe, [gm_key, video, gm_src, gm_lang], [gm_tr_tbl, gm_tr_msg])
+        gm_trans_btn.click(gm_translate, [gm_key, gm_out_lang, gm_only_missing, gm_tr_tbl],
+                           [gm_tr_tbl, gm_tr_msg])
+        gm_use_btn.click(gm_use_as_ocr, [video, out_root, gm_src, gm_out_lang, gm_tr_tbl],
+                         [gm_tr_msg, video]).then(load_table, [video, out_root, lang], tbl)
+        gm_preview_btn.click(gm_preview, [gm_key, gm_voice, gm_style], gm_preview_audio)
+        gm_tts_btn.click(gm_tts, [gm_key, video, out_root, gm_text, gm_voice, gm_style],
+                        [gm_tts_audio, gm_tts_msg])
+        gm_tts_tbl_btn.click(gm_tts_from_table, [gm_key, video, out_root, tbl, lang, gm_voice, gm_style],
+                            [gm_tts_audio, gm_tts_msg])
     return ui
 
 
