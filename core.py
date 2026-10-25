@@ -353,8 +353,9 @@ QUALITY = {"nhanh": ("veryfast", 23), "cân bằng": ("medium", 20), "đẹp": (
 
 
 def render(video, pdir, segs, lang, cfg, font="Arial", size=0, split_mode="sentence", split_sec=20,
-           quality="cân bằng", test_seconds=0, cb=Progress):
-    """Dựng video có phụ đề mới. split_mode: none | fixed | sentence. Trả về danh sách file."""
+           quality="cân bằng", test_seconds=0, dub_audio=None, cb=Progress):
+    """Dựng video có phụ đề mới. split_mode: none | fixed | sentence.
+    dub_audio: đường dẫn file audio (ví dụ giọng đọc TTS) để thay cho audio gốc, nếu có. Trả về danh sách file."""
     pdir = Path(pdir)
     w, h, fps, n = probe(video)
     dur = n / fps
@@ -367,8 +368,13 @@ def render(video, pdir, segs, lang, cfg, font="Arial", size=0, split_mode="sente
     cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(video)]
     if test_seconds:
         cmd += ["-t", str(test_seconds)]
-    cmd += ["-filter_complex_script", str(script), "-map", "[v]", "-map", "0:a?",
+    if dub_audio:
+        cmd += ["-i", str(dub_audio)]
+    cmd += ["-filter_complex_script", str(script), "-map", "[v]",
+            "-map", "1:a" if dub_audio else "0:a?",
             "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-c:a", "aac", "-b:a", "128k"]
+    if dub_audio:
+        cmd += ["-shortest"]
     if test_seconds:
         out = pdir / f"test_{test_seconds}s.mp4"
         files = [out]

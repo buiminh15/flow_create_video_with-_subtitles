@@ -216,13 +216,8 @@ def _save_wav(path, pcm_bytes, rate=24000, channels=1, sample_width=2):
         wf.writeframes(pcm_bytes)
 
 
-def text_to_speech(text, api_key, voice="Kore", out_path="output/tts.wav", style="", cb=Progress):
-    """Đọc văn bản thành giọng nói bằng Gemini TTS. Trả về đường dẫn file .wav."""
-    if not text or not text.strip():
-        raise RuntimeError("Chưa có nội dung để đọc.")
-    client = _client(api_key)
-    cb(0.2, "Đang tạo giọng nói...")
-    content = (f"{style.strip()}: {text.strip()}" if style.strip() else text.strip())
+def _pcm_tts(client, text, voice, style):
+    content = f"{style.strip()}: {text.strip()}" if style.strip() else text.strip()
     resp = _with_retry(lambda: client.models.generate_content(
         model=TTS_MODEL,
         contents=content,
@@ -235,9 +230,40 @@ def text_to_speech(text, api_key, voice="Kore", out_path="output/tts.wav", style
             ),
         ),
     ))
-    pcm = resp.candidates[0].content.parts[0].inline_data.data
+    return resp.candidates[0].content.parts[0].inline_data.data
+
+
+def text_to_speech(text, api_key, voice="Kore", out_path="output/tts.wav", style="", cb=Progress):
+    """Đọc văn bản thành giọng nói bằng Gemini TTS. Trả về đường dẫn file .wav."""
+    if not text or not text.strip():
+        raise RuntimeError("Chưa có nội dung để đọc.")
+    client = _client(api_key)
+    cb(0.2, "Đang tạo giọng nói...")
+    pcm = _pcm_tts(client, text, voice, style)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _save_wav(out_path, pcm)
     cb(1.0, "Xong")
+    return str(out_path)
+
+
+def dub_track(segs, api_key, voice, style, total_duration, out_path, cb=Progress):
+    """Tạo 1 file audio dài bằng total_duration (giây), mỗi đoạn giọng đọc (tr hoặc text) được chèn
+    đúng tại thời điểm 'start' của đoạn đó (khoảng trống giữa các đoạn là im lặng). Dùng để ghép thế
+    audio gốc khi xuất video (lồng tiếng theo đúng timing phụ đề). Trả về đường dẫn file .wav."""
+    client = _client(api_key)
+    rate = 24000
+    total_samples = max(1, int(total_duration * rate))
+    buf = bytearray(total_samples * 2)  # im lặng (16-bit mono)
+    todo = [s for s in segs if (s.get("tr") or s.get("text") or "").strip()]
+    for i, s in enumerate(todo):
+        cb(i / max(1, len(todo)), f"Đang tạo giọng đoạn {i + 1}/{len(todo)}")
+        text = (s.get("tr") or s["text"]).strip()
+        pcm = _pcm_tts(client, text, voice, style)
+        start_byte = max(0, int(s["start"] * rate)) * 2
+        n = min(len(pcm), max(0, len(buf) - start_byte))
+        if n > 0:
+            buf[start_byte:start_byte + n] = pcm[:n]
+    _save_wav(out_path, bytes(buf), rate=rate)
+    cb(1.0, "Xong giọng đọc")
     return str(out_path)

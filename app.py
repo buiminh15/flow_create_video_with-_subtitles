@@ -145,28 +145,35 @@ def preview_row(video, out_root, lang_name, rows, font, size, *cfg_args, evt: gr
 
 # ---------- tab 4 ----------
 def _render(video, out_root, lang_name, rows, font, size, split_mode, split_sec, quality, test, cfg_args,
-            progress):
+            use_tts, voice, style, api_key, progress):
     pd = _pd(video, out_root)
     segs = _segs_from_rows(rows)
     if not segs or any(not s["tr"] for s in segs):
         raise gr.Error("Còn đoạn chưa có bản dịch — hoàn tất ở tab 2/3 trước.")
+    dub_path = None
+    if use_tts:
+        progress(0, desc="Đang tạo giọng đọc TTS...")
+        _, _, fps, n = core.probe(video)
+        dub_path = pd / f"dub_{LANGS[lang_name]}_{voice}.wav"
+        gemini_ai.dub_track(segs, api_key, voice, style, n / fps, dub_path,
+                            cb=lambda f, m: progress(f * 0.5, desc=m))
     mode = {"Không cắt": "none", "Theo ranh giới câu": "sentence", "Cố định theo giây": "fixed"}[split_mode]
     files = core.render(video, pd, segs, LANGS[lang_name], _cfg(*cfg_args), font, int(size or 0), mode,
-                        float(split_sec), quality, test_seconds=15 if test else 0,
-                        cb=lambda f, m: progress(f, desc=m))
+                        float(split_sec), quality, test_seconds=15 if test else 0, dub_audio=dub_path,
+                        cb=lambda f, m: progress(0.5 + f * 0.5 if use_tts else f, desc=m))
     return files, files[0] if len(files) == 1 else None, f"Xong: {len(files)} file trong {pd}"
 
 
 def render_test(video, out_root, lang_name, rows, font, size, split_mode, split_sec, quality,
-                y0, y1, use_logo, lx, ly, lw, lh, progress=gr.Progress()):
+                y0, y1, use_logo, lx, ly, lw, lh, use_tts, voice, style, api_key, progress=gr.Progress()):
     return _render(video, out_root, lang_name, rows, font, size, split_mode, split_sec, quality, True,
-                   (y0, y1, use_logo, lx, ly, lw, lh), progress)
+                   (y0, y1, use_logo, lx, ly, lw, lh), use_tts, voice, style, api_key, progress)
 
 
 def render_full(video, out_root, lang_name, rows, font, size, split_mode, split_sec, quality,
-                y0, y1, use_logo, lx, ly, lw, lh, progress=gr.Progress()):
+                y0, y1, use_logo, lx, ly, lw, lh, use_tts, voice, style, api_key, progress=gr.Progress()):
     return _render(video, out_root, lang_name, rows, font, size, split_mode, split_sec, quality, False,
-                   (y0, y1, use_logo, lx, ly, lw, lh), progress)
+                   (y0, y1, use_logo, lx, ly, lw, lh), use_tts, voice, style, api_key, progress)
 
 
 # ---------- tab 0: tải video ----------
@@ -457,6 +464,10 @@ def build():
                     split_mode = gr.Radio(["Theo ranh giới câu", "Cố định theo giây", "Không cắt"],
                                           value="Theo ranh giới câu", label="Cắt clip")
                     split_sec = gr.Number(value=20, label="Độ dài mỗi clip (giây)")
+                use_tts = gr.Checkbox(
+                    value=False,
+                    label="Ghép giọng đọc TTS (Gemini) thay cho audio gốc — dùng giọng/phong cách đã chọn ở "
+                          "tab ⑤ Gemini, lồng tiếng theo đúng thời điểm từng câu phụ đề")
                 with gr.Row():
                     test_btn = gr.Button("Xuất thử 15 giây đầu")
                     full_btn = gr.Button("Xuất toàn bộ", variant="primary")
@@ -490,8 +501,9 @@ def build():
         save_btn.click(save_table, [video, out_root, lang, tbl], edit_msg)
         tbl.select(preview_row, [video, out_root, lang, tbl, font, size, *cfg_in], prev)
         render_in = [video, out_root, lang, tbl, font, size, split_mode, split_sec, quality]
-        test_btn.click(render_test, [*render_in, *cfg_in], [out_files, out_vid, out_msg])
-        full_btn.click(render_full, [*render_in, *cfg_in], [out_files, out_vid, out_msg])
+        tts_in = [use_tts, gm_voice, gm_style, gm_key]
+        test_btn.click(render_test, [*render_in, *cfg_in, *tts_in], [out_files, out_vid, out_msg])
+        full_btn.click(render_full, [*render_in, *cfg_in, *tts_in], [out_files, out_vid, out_msg])
 
         gm_tr_btn.click(gm_transcribe, [gm_key, video, gm_src, gm_lang], [gm_tr_tbl, gm_tr_msg])
         gm_trans_btn.click(gm_translate, [gm_key, gm_out_lang, gm_only_missing, gm_tr_tbl],
