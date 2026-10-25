@@ -50,7 +50,14 @@ def _with_retry(fn, tries=3, wait=4):
         try:
             return fn()
         except Exception as e:
-            if i == tries - 1 or "UNAVAILABLE" not in str(e) and "503" not in str(e):
+            msg = str(e)
+            if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+                raise RuntimeError(
+                    "Hết quota Gemini API free tier (giới hạn request/ngày theo model). "
+                    "Đợi theo thời gian Google báo (thường vài giờ) hoặc nâng cấp plan có billing tại "
+                    "aistudio.google.com. Chi tiết: " + msg[:300]
+                ) from None
+            if i == tries - 1 or ("UNAVAILABLE" not in msg and "503" not in msg):
                 raise
             time.sleep(wait)
 

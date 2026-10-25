@@ -10,8 +10,9 @@ import cv2
 
 REF_W, REF_H = 1280, 720
 DEFAULT_CFG = {
-    "sub_y0": 560, "sub_y1": 700,           # vùng phụ đề cũ
-    "use_logo": True, "logo": [1050, 20, 220, 60],  # x, y, w, h
+    "sub_y0": 560, "sub_y1": 700,           # vùng phụ đề cũ (cũng là nơi hiện phụ đề dịch khi render)
+    "use_logo": False, "logo": [1050, 20, 220, 60],  # x, y, w, h
+    "jp_mode": False, "jp_y0": 20, "jp_y1": 100,  # vùng OCR riêng cho phụ đề tiếng Nhật (thường ở trên)
 }
 Progress = lambda frac, msg="": None  # callback mặc định
 
@@ -63,7 +64,8 @@ def tr_path(pdir, lang):
 
 # ---------- xem trước vùng ----------
 def frame_with_boxes(video, t, cfg):
-    """Khung hình tại giây t, vẽ ô vùng phụ đề (xanh) và logo (đỏ). Trả về ảnh RGB."""
+    """Khung hình tại giây t, vẽ ô vùng phụ đề (xanh), logo (đỏ) và vùng OCR tiếng Nhật (vàng, nếu bật).
+    Trả về ảnh RGB."""
     cap = cv2.VideoCapture(str(video))
     cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
     ok, frame = cap.read()
@@ -76,6 +78,9 @@ def frame_with_boxes(video, t, cfg):
     if cfg["use_logo"]:
         x, y, bw, bh = cfg["logo"]
         cv2.rectangle(frame, (int(x * sx), int(y * sy)), (int((x + bw) * sx), int((y + bh) * sy)), (0, 0, 230), 2)
+    if cfg.get("jp_mode"):
+        cv2.rectangle(frame, (int(w * 0.1), int(cfg["jp_y0"] * sy)), (int(w * 0.9), int(cfg["jp_y1"] * sy)),
+                      (0, 220, 255), 2)
     return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
@@ -121,8 +126,10 @@ def run_ocr(video, pdir, cfg, step=0.5, force=False, cb=Progress):
     w, h, fps, n = probe(video)
     dur = n / fps
     stride = max(1, round(fps * step))
-    y0, y1 = int(cfg["sub_y0"] * h / REF_H), int(cfg["sub_y1"] * h / REF_H)
-    key = {"y0": cfg["sub_y0"], "y1": cfg["sub_y1"], "step": step, "n": n}
+    jp_mode = cfg.get("jp_mode", False)
+    ocr_y0, ocr_y1 = (cfg["jp_y0"], cfg["jp_y1"]) if jp_mode else (cfg["sub_y0"], cfg["sub_y1"])
+    y0, y1 = int(ocr_y0 * h / REF_H), int(ocr_y1 * h / REF_H)
+    key = {"y0": ocr_y0, "y1": ocr_y1, "step": step, "n": n}
     ck_path = pdir / "ocr_checkpoint.json"
     ck = read_json(ck_path)
     samples, start_i = [], 0

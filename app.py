@@ -46,22 +46,23 @@ def _load_segs(pdir, lang):
     return core.ensure_ids(segs) if segs else []
 
 
-def _cfg(sub_y0, sub_y1, use_logo, lx, ly, lw, lh):
+def _cfg(sub_y0, sub_y1, use_logo, lx, ly, lw, lh, jp_mode=False, jp_y0=20, jp_y1=100):
     return {"sub_y0": int(sub_y0), "sub_y1": int(sub_y1), "use_logo": bool(use_logo),
-            "logo": [int(lx), int(ly), int(lw), int(lh)]}
+            "logo": [int(lx), int(ly), int(lw), int(lh)],
+            "jp_mode": bool(jp_mode), "jp_y0": int(jp_y0), "jp_y1": int(jp_y1)}
 
 
 # ---------- tab 1 ----------
 def on_video(path, out_root):
     """Chọn video: nạp cấu hình dự án + thông tin."""
     if not path:
-        return [gr.update()] * 9
+        return [gr.update()] * 12
     w, h, fps, n = core.probe(path)
     pd = core.project_dir(path, out_root or "output")
     c = core.load_cfg(pd)
     info = f"{w}x{h}, {fps:.1f} fps, {n / fps:.0f}s  ·  dự án: {pd}"
     return (info, gr.update(maximum=max(1, n / fps), value=min(5, n / fps)), c["sub_y0"], c["sub_y1"],
-            c["use_logo"], *c["logo"])
+            c["use_logo"], *c["logo"], c.get("jp_mode", False), c.get("jp_y0", 20), c.get("jp_y1", 100))
 
 
 def show_regions(video, t, *cfg_args):
@@ -165,15 +166,28 @@ def _render(video, out_root, lang_name, rows, font, size, split_mode, split_sec,
 
 
 def render_test(video, out_root, lang_name, rows, font, size, split_mode, split_sec, quality,
-                y0, y1, use_logo, lx, ly, lw, lh, use_tts, voice, style, api_key, progress=gr.Progress()):
+                y0, y1, use_logo, lx, ly, lw, lh, jp_mode, jp_y0, jp_y1,
+                use_tts, voice, style, api_key, progress=gr.Progress()):
     return _render(video, out_root, lang_name, rows, font, size, split_mode, split_sec, quality, True,
-                   (y0, y1, use_logo, lx, ly, lw, lh), use_tts, voice, style, api_key, progress)
+                   (y0, y1, use_logo, lx, ly, lw, lh, jp_mode, jp_y0, jp_y1), use_tts, voice, style, api_key,
+                   progress)
 
 
 def render_full(video, out_root, lang_name, rows, font, size, split_mode, split_sec, quality,
-                y0, y1, use_logo, lx, ly, lw, lh, use_tts, voice, style, api_key, progress=gr.Progress()):
+                y0, y1, use_logo, lx, ly, lw, lh, jp_mode, jp_y0, jp_y1,
+                use_tts, voice, style, api_key, progress=gr.Progress()):
     return _render(video, out_root, lang_name, rows, font, size, split_mode, split_sec, quality, False,
-                   (y0, y1, use_logo, lx, ly, lw, lh), use_tts, voice, style, api_key, progress)
+                   (y0, y1, use_logo, lx, ly, lw, lh, jp_mode, jp_y0, jp_y1), use_tts, voice, style, api_key,
+                   progress)
+
+
+def tts_estimate(use_tts, rows):
+    if not use_tts:
+        return ""
+    segs = _segs_from_rows(rows)
+    n = sum(1 for s in segs if (s.get("tr") or s.get("text") or "").strip())
+    return (f"⚠ Sẽ gọi Gemini TTS **{n} lần** (1 request/câu). Free tier chỉ **10 request/ngày** cho model "
+            f"TTS — kiểm tra quota trước khi bấm Xuất, tránh chạy giữa đường bị lỗi 429.")
 
 
 # ---------- tab 0: tải video ----------
@@ -381,17 +395,27 @@ def build():
                     with gr.Column(scale=1):
                         y0 = gr.Slider(0, 719, value=560, step=1, label="Phụ đề: y trên (chuẩn 720p)")
                         y1 = gr.Slider(1, 720, value=700, step=1, label="Phụ đề: y dưới")
-                        use_logo = gr.Checkbox(value=True, label="Xoá logo/watermark cố định")
+                        use_logo = gr.Checkbox(value=False, label="Xoá logo/watermark cố định")
                         lx = gr.Slider(0, 1279, value=1050, step=1, label="Logo x")
                         ly = gr.Slider(0, 719, value=20, step=1, label="Logo y")
                         lw = gr.Slider(1, 1280, value=220, step=1, label="Logo rộng")
                         lh = gr.Slider(1, 720, value=60, step=1, label="Logo cao")
+                        jp_mode = gr.Checkbox(
+                            value=False,
+                            label="Video Nhật (thêm vùng OCR tiếng Nhật ở trên, vùng phụ đề/bản dịch vẫn ở dưới)")
+                        jp_y0 = gr.Slider(0, 719, value=20, step=1, label="Phụ đề Nhật: y trên",
+                                         visible=False)
+                        jp_y1 = gr.Slider(1, 720, value=100, step=1, label="Phụ đề Nhật: y dưới",
+                                         visible=False)
                         step = gr.Slider(0.25, 1.0, value=0.5, step=0.25, label="Chu kỳ lấy mẫu OCR (giây)")
                         force = gr.Checkbox(label="OCR lại từ đầu (bỏ cache/checkpoint)")
                         ocr_btn = gr.Button("Chạy OCR", variant="primary")
+                gr.Markdown("Ô xanh = vùng phụ đề/bản dịch (dưới) · Ô đỏ = logo · Ô vàng = vùng OCR tiếng Nhật "
+                           "(trên, chỉ hiện khi bật 'Video Nhật'). Khi bật Video Nhật, OCR sẽ đọc từ vùng vàng "
+                           "(tiếng Nhật) làm nguồn để dịch, còn vùng xanh dùng để hiện bản dịch khi xuất video.")
                 ocr_msg = gr.Markdown()
                 ocr_tbl = gr.Dataframe(headers=COLS, label="Kết quả OCR", interactive=False, wrap=True)
-            cfg_in = [y0, y1, use_logo, lx, ly, lw, lh]
+            cfg_in = [y0, y1, use_logo, lx, ly, lw, lh, jp_mode, jp_y0, jp_y1]
 
             with gr.Tab("② Dịch"):
                 lang = gr.Dropdown(list(LANGS), value="Tiếng Việt", label="Ngôn ngữ đích")
@@ -468,6 +492,7 @@ def build():
                     value=False,
                     label="Ghép giọng đọc TTS (Gemini) thay cho audio gốc — dùng giọng/phong cách đã chọn ở "
                           "tab ⑤ Gemini, lồng tiếng theo đúng thời điểm từng câu phụ đề")
+                tts_est_msg = gr.Markdown()
                 with gr.Row():
                     test_btn = gr.Button("Xuất thử 15 giây đầu")
                     full_btn = gr.Button("Xuất toàn bộ", variant="primary")
@@ -486,12 +511,14 @@ def build():
         dl_btn.click(dl_run, [dl_url, dl_quality, dl_cookies], [dl_pick, video, dl_msg])
         dl_pick.input(lambda f: f or "", dl_pick, video)
         dl_upd_btn.click(dl_update, None, dl_msg)
-        video.change(on_video, [video, out_root], [info, t_sl, y0, y1, use_logo, lx, ly, lw, lh]).then(
+        video.change(on_video, [video, out_root],
+                    [info, t_sl, y0, y1, use_logo, lx, ly, lw, lh, jp_mode, jp_y0, jp_y1]).then(
             show_regions, [video, t_sl, *cfg_in], img).then(
             load_table, [video, out_root, lang], tbl)
         for c in [t_sl, *cfg_in]:
             c.release(show_regions, [video, t_sl, *cfg_in], img) if isinstance(c, gr.Slider) else \
                 c.change(show_regions, [video, t_sl, *cfg_in], img)
+        jp_mode.change(lambda on: (gr.update(visible=on), gr.update(visible=on)), jp_mode, [jp_y0, jp_y1])
         ocr_btn.click(do_ocr, [video, out_root, step, force, *cfg_in], [ocr_tbl, ocr_msg]).then(
             load_table, [video, out_root, lang], tbl)
         tr_btn.click(do_translate, [video, out_root, lang, only_missing], [tbl, tr_msg])
@@ -504,6 +531,8 @@ def build():
         tts_in = [use_tts, gm_voice, gm_style, gm_key]
         test_btn.click(render_test, [*render_in, *cfg_in, *tts_in], [out_files, out_vid, out_msg])
         full_btn.click(render_full, [*render_in, *cfg_in, *tts_in], [out_files, out_vid, out_msg])
+        use_tts.change(tts_estimate, [use_tts, tbl], tts_est_msg)
+        tbl.change(tts_estimate, [use_tts, tbl], tts_est_msg)
 
         gm_tr_btn.click(gm_transcribe, [gm_key, video, gm_src, gm_lang], [gm_tr_tbl, gm_tr_msg])
         gm_trans_btn.click(gm_translate, [gm_key, gm_out_lang, gm_only_missing, gm_tr_tbl],
